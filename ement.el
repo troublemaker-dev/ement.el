@@ -303,7 +303,7 @@ Ement: SSO login accepted; session token received.  Connecting to Matrix server.
                                          (when (process-live-p sso-server-process)
                                            (delete-process sso-server-process))))
                   (let ((url (concat (ement-server-uri-prefix (ement-session-server session))
-                                     "/_matrix/client/r0/login/sso/redirect?redirectUrl=http://localhost:"
+                                     "/_matrix/client/v3/login/sso/redirect?redirectUrl=http://localhost:"
                                      (number-to-string ement-sso-server-port))))
                     (funcall browse-url-secondary-browser-function url)
                     (message "Browsing to single sign-on page <%s>..." url)))

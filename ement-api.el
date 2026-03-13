@@ -70,7 +70,7 @@
                              ;; should be.  Sometimes the matrix.org homeserver
                              ;; can get slow and respond a minute or two later.
                              (connect-timeout 10) (timeout 60)
-                             (version "r0"))
+                             (version "v3"))
   "Make API request on SESSION to ENDPOINT.
 The request automatically uses SESSION's server, URI prefix, and
 access token.

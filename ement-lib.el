@@ -584,10 +584,7 @@ otherwise use current room."
 
 ;;;;;; Push rules
 
-;; NOTE: Although v1.4 of the spec is available and describes setting the push rules using
-;; the "v3" API endpoint, the Element client continues to use the "r0" endpoint, which is
-;; slightly different.  This implementation will follow Element's initially, because the
-;; spec is not simple, and imitating Element's requests will make it easier.
+;; NOTE: Push rules use the "v3" API endpoint per the current spec.
 
 (defun ement-room-notification-state (room session)
   "Return notification state for ROOM on SESSION.
@@ -682,11 +679,11 @@ default, `all', `mentions-and-keywords', or `none'."
                                        ;; Setting rules requires PUTting the rules, then making a second
                                        ;; request to enable them.
                                        (lambda (_data)
-                                         (ement-api session (concat endpoint "/enabled") :queue queue :version "r0"
+                                         (ement-api session (concat endpoint "/enabled") :queue queue :version "v3"
                                            :method 'put :data (json-encode (ement-alist 'enabled t))
                                            :then message-fn))
                                      message-fn)))
-                  (ement-api session endpoint :queue queue :method method :version "r0"
+                  (ement-api session endpoint :queue queue :method method :version "v3"
                     :data (json-encode rule)
                     :then then
                     :else (lambda (plz-error)
@@ -766,7 +763,10 @@ body."
 THEN and ELSE are passed to `ement-api', which see."
   (declare (indent defun))
   (ement-api session "upload" :method 'post :endpoint-category "media"
-    ;; NOTE: Element currently uses "r0" not "v3", so so do we.
+    ;; NOTE: The media upload endpoint uses the legacy /_matrix/media/r0/ path.
+    ;; Migrating to /_matrix/client/v1/media/upload requires changing endpoint-category
+    ;; as well, which is a separate task.
+    :version "r0"
     :params (when filename
               (list (list "filename" filename)))
     :content-type content-type :data data :data-type 'binary
