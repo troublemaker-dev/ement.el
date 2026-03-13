@@ -941,10 +941,8 @@ and `session' to the session.  Adds function to
     ;; means that, if a user has them disabled and then reenables them, they will
     ;; likely need to reconnect to cause them to be displayed in most rooms.
     (if-let ((url (alist-get 'url (ement-event-content event))))
-        (plz-run
-         (plz-queue ement-images-queue
-           'get (ement--mxc-to-url url session) :as 'binary :noquery t
-           :then (lambda (data)
+        (ement--media-request url session :queue ement-images-queue :as 'binary
+          :then (lambda (data)
                    (when ement-room-avatars
                      ;; MAYBE: Store the raw image data instead of using create-image here.
                      (let ((image (create-image data nil 'data-p

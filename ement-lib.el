@@ -762,11 +762,7 @@ body."
   "Upload DATA with FILENAME to content repository on SESSION.
 THEN and ELSE are passed to `ement-api', which see."
   (declare (indent defun))
-  (ement-api session "upload" :method 'post :endpoint-category "media"
-    ;; NOTE: The media upload endpoint uses the legacy /_matrix/media/r0/ path.
-    ;; Migrating to /_matrix/client/v1/media/upload requires changing endpoint-category
-    ;; as well, which is a separate task.
-    :version "r0"
+  (ement-api session "media/upload" :method 'post :version "v1"
     :params (when filename
               (list (list "filename" filename)))
     :content-type content-type :data data :data-type 'binary
