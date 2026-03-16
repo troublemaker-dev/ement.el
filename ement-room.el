@@ -1824,9 +1824,9 @@ buffer).  It receives two arguments, the room and the session."
            ;; but it's not disallowed either)".  See
            ;; <https://matrix.to/#/!jxlRxnrZCsjpjDubDX:matrix.org/$Cnb53UQdYnGFizM49Aje_Xs0BxVdt-be7Dnm7_k-0ho>.
            (rx bos (or "#" "!") (1+ (not (any ":")))
-               ":" (1+ (or alnum (any "-."))))
+               (optional ":" (1+ (or alnum (any "-.")))))
            id-or-alias)
-    (user-error "Invalid room ID or alias (use, e.g. \"#ROOM-ALIAS:SERVER\")"))
+    (user-error "Invalid room ID or alias (use, e.g. \"!ROOMID\", \"!ROOMID:SERVER\", or \"#ALIAS:SERVER\")"))
   (let ((endpoint (format "join/%s" (url-hexify-string id-or-alias))))
     (ement-api session endpoint :method 'post :data ""
       :then (lambda (data)
