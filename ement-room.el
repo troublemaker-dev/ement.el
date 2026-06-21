@@ -2639,7 +2639,9 @@ the previously oldest event."
                ((cl-struct ement-room (id room-id)) room)
                (endpoint (format "rooms/%s/typing/%s"
                                  (url-hexify-string room-id) (url-hexify-string user-id)))
-               (data (ement-alist "typing" typing "timeout" 20000)))
+               (data (if typing
+                         (ement-alist "typing" t "timeout" 20000)
+                       (ement-alist "typing" :json-false))))
     (ement-api session endpoint :method 'put :data (json-encode data)
       ;; We don't really care about the response, I think.
       :then #'ignore)))
