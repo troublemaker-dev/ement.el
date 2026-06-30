@@ -663,7 +663,7 @@ Runs `ement-sync-callback-hook' with SESSION."
   (setf (map-elt ement-syncs session) nil)
   (pcase-let* (((map rooms ('next_batch next-batch) ('account_data (map ('events account-data-events))))
                 data)
-               ((map ('join joined-rooms) ('invite invited-rooms) ('leave left-rooms)) rooms)
+               ((map ('join joined-rooms) ('invite invited-rooms) ('knock knocked-rooms) ('leave left-rooms)) rooms)
                (num-events (+
                             ;; HACK: In `ement--push-joined-room-events', we do something
                             ;; with each event 3 times, so we multiply this by 3.
@@ -688,6 +688,8 @@ Runs `ement-sync-callback-hook' with SESSION."
       (mapc (apply-partially #'ement--push-left-room-events session) left-rooms)
       ;; Invited rooms.
       (mapc (apply-partially #'ement--push-invite-room-events session) invited-rooms)
+      ;; Knocked rooms.
+      (mapc (apply-partially #'ement--push-knock-room-events session) knocked-rooms)
       ;; Joined rooms.
       (mapc (apply-partially #'ement--push-joined-room-events session) joined-rooms))
     ;; TODO: Process "left" rooms (remove room structs, etc).
@@ -715,6 +717,21 @@ Runs `ement-sync-callback-hook' with SESSION."
   "Push events for INVITED-ROOM into that room in SESSION."
   ;; TODO: Make ement-session-rooms a hash-table.
   (ement--push-joined-room-events session invited-room 'invite))
+
+(defun ement--push-knock-room-events (session knocked-room)
+  "Push knock_state events for KNOCKED-ROOM into that room in SESSION."
+  (pcase-let* ((`(,id . ,event-types) knocked-room)
+               (id (symbol-name id))
+               (room (or (cl-find-if (lambda (room)
+                                       (equal id (ement-room-id room)))
+                                     (ement-session-rooms session))
+                         (car (push (make-ement-room :id id) (ement-session-rooms session)))))
+               ((map ('knock_state (map ('events knock-state-events)))) event-types))
+    (setf (ement-room-status room) 'knock)
+    (cl-loop for event across-ref knock-state-events do
+             (setf event (ement--make-event event))
+             (push event (ement-room-invite-state room))
+             (run-hook-with-args 'ement-event-hook event room session))))
 
 (defun ement--auto-sync (session)
   "If `ement-auto-sync' is non-nil, sync SESSION again."

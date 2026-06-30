@@ -309,6 +309,29 @@ If UNIGNORE-P (interactively, with prefix), un-ignore USER."
               (ement-debug "PUT successful" data)
               (message "Ement: User %s %s." user-id (if unignore-p "unignored" "ignored"))))))
 
+(defun ement-room-knock (room-or-id session &optional reason)
+  "Knock on ROOM-OR-ID on SESSION, requesting entry.
+ROOM-OR-ID may be an `ement-room' struct or a room ID/alias string.
+REASON, if non-nil, is sent with the knock request."
+  (interactive
+   (let* ((session (ement-complete-session))
+          (room-or-id (read-string "Room to knock on (ID or alias): "))
+          (reason (read-string "Reason (optional, RET to skip): ")))
+     (list room-or-id session (unless (string-empty-p reason) reason))))
+  (let ((room-id-or-alias (cl-etypecase room-or-id
+                            (ement-room (ement-room-id room-or-id))
+                            (string room-or-id))))
+    (ement-api session (format "knock/%s" (url-hexify-string room-id-or-alias))
+      :method 'post
+      :data (if reason (json-encode (ement-alist "reason" reason)) "{}")
+      :then (lambda (_data)
+              (ement-message "Knocked on room: %s" room-id-or-alias))
+      :else (lambda (plz-error)
+              (pcase-let* (((cl-struct plz-error response) plz-error)
+                           ((cl-struct plz-response status body) response)
+                           ((map error) (ignore-errors (json-read-from-string body))))
+                (error "Unable to knock on room %s: %s %s" room-id-or-alias status error))))))
+
 (defun ement-invite-user (user-id room session)
   "Invite USER-ID to ROOM on SESSION.
 Interactively, with prefix, prompt for room and session,

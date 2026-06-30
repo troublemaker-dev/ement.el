@@ -36,9 +36,9 @@
 ;; that is so at expansion time, the expanded macro calls format the message and check the
 ;; log level at runtime, which is not zero-cost.
 
-;; (eval-and-compile
-;;   (setq-local warning-minimum-log-level nil)
-;;   (setq-local warning-minimum-log-level :debug))
+(eval-and-compile
+  (setq-local warning-minimum-log-level nil)
+  (setq-local warning-minimum-log-level :debug))
 
 ;;;; Requirements
 
