@@ -1096,9 +1096,12 @@ period, anywhere in the body."
 
 (defun ement--event-mentions-room-p (event &rest _ignore)
   "Return non-nil if EVENT mentions \"@room\"."
-  (pcase-let (((cl-struct ement-event (content (map body))) event))
-    (when body
-      (string-match-p (rx (or space bos) "@room" eow) body))))
+  (pcase-let (((cl-struct ement-event (content (map body ('m\.mentions m-mentions)))) event))
+    (cond
+     ;; Spec v1.7+: use structured m.mentions.room when present.
+     (m-mentions (eq t (map-elt m-mentions 'room)))
+     ;; Fallback: body-text matching for messages from older clients.
+     (body (string-match-p (rx (or space bos) "@room" eow) body)))))
 
 (cl-defun ement-complete-room (&key session (predicate #'identity)
                                     (prompt "Room: ") (suggest t))

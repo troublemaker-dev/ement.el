@@ -4243,19 +4243,24 @@ HTML is rendered to Emacs text using `shr-insert-document'."
 (cl-defun ement-room--event-mentions-user-p (event user &optional (room ement-room))
   "Return non-nil if EVENT in ROOM mentions USER."
   (pcase-let* (((cl-struct ement-event content) event)
-               ((map body formatted_body) content)
+               ((map body formatted_body ('m\.mentions m-mentions)) content)
                (body (or formatted_body body)))
-    ;; FIXME: `ement--user-displayname-in' may not be returning the right result for the
-    ;; local user, so test the displayname slot too.  (But even that may be nil sometimes?
-    ;; Something needs to be fixed...)
-    ;; HACK: So we use the username slot, which was created just for this, for now.
-    (when body
-      (cl-macrolet ((matches-body-p
-                      (form) `(when-let ((string ,form))
-                                (string-match-p (regexp-quote string) body))))
-        (or (matches-body-p (ement-user-username user))
-            (matches-body-p (ement--user-displayname-in room user))
-            (matches-body-p (ement-user-id user)))))))
+    (if m-mentions
+        ;; Spec v1.7+: use structured m.mentions field when present.
+        (seq-contains-p (or (map-elt m-mentions 'user_ids) [])
+                        (ement-user-id user) #'equal)
+      ;; Fallback: body-text matching for messages from older clients.
+      ;; FIXME: `ement--user-displayname-in' may not be returning the right result for the
+      ;; local user, so test the displayname slot too.  (But even that may be nil sometimes?
+      ;; Something needs to be fixed...)
+      ;; HACK: So we use the username slot, which was created just for this, for now.
+      (when body
+        (cl-macrolet ((matches-body-p
+                        (form) `(when-let ((string ,form))
+                                  (string-match-p (regexp-quote string) body))))
+          (or (matches-body-p (ement-user-username user))
+              (matches-body-p (ement--user-displayname-in room user))
+              (matches-body-p (ement-user-id user))))))))
 
 (defun ement-room--linkify-urls (string)
   "Return STRING with URLs in it made clickable."
