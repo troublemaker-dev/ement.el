@@ -600,7 +600,7 @@ a filter ID).  When unspecified, the value of
       (user-error "Ement: Already syncing this session")))
   (pcase-let* (((cl-struct ement-session next-batch) session)
                (params (remove
-                        nil (list (list "full_state" (if next-batch "false" "true"))
+                        nil (list (list "full_state" "false")
                                   (when filter
                                     ;; TODO: Document filter arg.
                                     (list "filter" (json-encode filter)))
