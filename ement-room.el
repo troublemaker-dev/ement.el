@@ -3235,10 +3235,13 @@ function to `ement-room-event-fns', which see."
   (with-silent-modifications
     (ement-room--insert-event event)))
 
+(declare-function ement--make-event "ement.el")
+(declare-function ement--put-event "ement.el")
 (ement-room-defevent "m.room.message"
   (pcase-let* (((cl-struct ement-event content unsigned) event)
                ((map ('m.relates_to (map ('rel_type rel-type) ('event_id replaces-event-id)))) content)
-               ((map ('m.relations (map ('m.replace (map ('event_id replaced-by-id)))))) unsigned))
+               ((map ('m.relations (map ('m.replace replacement)))) unsigned)
+               ((map ('event_id replaced-by-id)) replacement))
     (if (and ement-room-replace-edited-messages
              replaces-event-id (equal "m.replace" rel-type))
         ;; Event replaces existing event: find and replace it in buffer if possible, otherwise insert it.
@@ -3247,9 +3250,16 @@ function to `ement-room-event-fns', which see."
               (ement-debug "Unable to replace event ID: inserting instead." replaces-event-id)
               (ement-room--insert-event event)))
       ;; New event.
-      (if replaced-by-id
-          (ement-debug "Event replaced: not inserting." replaced-by-id)
-        ;; Not replaced: insert it.
+      (if-let (((and replaced-by-id ement-room-replace-edited-messages))
+               (replacement-event (ement--make-event replacement)))
+          ;; The server has already bundled the latest edit as an aggregation (e.g. when
+          ;; paginating history, where the edit event itself is typically not included in
+          ;; the response).  Insert the replacement directly instead of dropping this event
+          ;; and waiting for an edit event that may never arrive separately.
+          (progn
+            (ement--put-event replacement-event nil ement-session)
+            (ement-room--insert-event replacement-event))
+        ;; Not replaced, or replacement unusable: insert the original event.
         (ement-room--insert-event event)))))
 
 (ement-room-defevent "m.room.tombstone"
