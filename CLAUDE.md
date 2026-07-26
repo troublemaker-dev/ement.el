@@ -32,6 +32,8 @@ The project uses `makem.sh` (wrapped by `Makefile`) for building, linting, and t
 
 Tests live in `tests/ement-tests.el` and use ERT (`ert-deftest`).
 
+On macOS, `makem.sh` requires GNU getopt and bash ≥4 on `PATH` (BSD getopt breaks argument parsing, and macOS's bash 3.2 has an array-expansion bug that empties `files-project-feature`). Install both via Homebrew (`getopt` is keg-only as `gnu-getopt`) and ensure `/opt/homebrew/bin` (or `/usr/local/bin` on Intel) precedes the system paths.
+
 To enable debug messages while developing, uncomment the `eval-and-compile` block near the top of the relevant file and byte-compile it:
 ```elisp
 ;; (eval-and-compile
@@ -74,3 +76,6 @@ Ement.el is a Matrix client for Emacs. The codebase is structured as a collectio
 - **Events**: Raw Matrix events are parsed into `ement-event` structs. `ement-event-hook` is called for each event during sync processing.
 - **Room buffers**: Each room has an EWOC-backed buffer. `ement-room` local variables `ement-room` and `ement-session` identify which room/session the buffer belongs to.
 - **`ement-propertize` macro**: Used instead of `propertize` throughout to ensure both `face` and `font-lock-face` properties are set (workaround for magit-section compatibility).
+- **The "dependency order" above is a load-order convention, not a runtime restriction.** A lower-level file (e.g. `ement-room.el`) may call a function defined in a higher-level file (e.g. `ement--make-event` or `ement--put-event` in `ement.el`), because by the time any interactive code actually runs, the whole package has been `require`d and every function exists. Byte-compiling standalone would warn about the forward reference, so add a top-level `(declare-function fn "file.el")` next to the call site (see `ement-room.el`'s `m.room.message` event handler and `ement-room-retro-callback` for examples). Don't move functions between files just to satisfy the byte-compiler.
+- **Message format spec**: `ement-room-message-format-spec` is a `format-spec`-style string whose characters are registered via `ement-room-define-event-formatter` (e.g. `%r` reactions, `%H` thread summary, `%B` body). Each formatter is a function of `(event room session)` added to `ement-room-event-formatters`. Add new inline per-message annotations this way rather than special-casing them elsewhere.
+- **Bundled aggregations (`unsigned.m.relations`)**: the server bundles the *latest* `m.replace` (edit) and a summary of `m.thread` (thread) relations onto the target event's `unsigned.m.relations`. **`m.annotation` (reactions) are explicitly never bundled by the server** — reaction counts must be assembled client-side from live `m.reaction` events, which is why the reaction-handling code (`m.reaction` event handler, `ement-room--format-reactions`) works entirely differently from the edit/thread handling. When touching relation-related code, verify behavior against the current spec rather than assuming symmetry between relation types.
