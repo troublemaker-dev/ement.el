@@ -192,6 +192,7 @@ Note that if global minor mode ~ement-room-self-insert-mode~ is enabled (by defa
 + Write message: ~RET~
 + Compose message in buffer: ~M-RET~ (while writing in minibuffer: ~C-c '‍~).  Customize the option ~ement-room-compose-method~ to make ~RET~ and the other message bindings use a compose buffer by default.  Use command ~ement-room-compose-org~ to activate Org mode in the compose buffer.
 + Write reply to event at point: ~S-<return>~
++ Write threaded reply to event at point (starts a new thread if it's not already in one): ~s t~
 + Edit message: ~<insert>~
 + Delete message: ~C-k~
 + Send reaction to event at point, or send same reaction at point: ~s r~
@@ -299,7 +300,27 @@ Ement.el doesn't support encrypted rooms natively, but it can be used transparen
 
 ** 0.18-pre
 
-Nothing new yet.
+This release upgrades Ement.el's Matrix protocol support from r0.6.1 toward v1.17.
+
+*Additions*
+
++ Thread support: threaded replies are recognized via their ~m.thread~ relation and shown inline (with a rich-reply fallback quote, per the spec's recommendation for clients without a dedicated thread view).  A "N replies in thread" summary is shown on thread-root messages, derived from the server's bundled aggregation.  Command ~ement-room-write-thread-reply~ (bound to ~s t~) replies within an existing thread or starts a new one from the event at point.  Unread thread notification counts (~unread_thread_notifications~) are now requested in the sync filter and considered when determining whether a room is unread.
++ Server version negotiation: ~GET /_matrix/client/versions~ is queried at login/sync time, and the negotiated version is used for subsequent API calls (falling back to ~v3~).
++ Access token refresh: refresh tokens are stored and used to automatically renew an expiring access token.
++ Room knocking support (Matrix v1.1+).
+
+*Changes*
+
++ Client API version prefix upgraded from ~r0~ to ~v3~.
++ Media upload/download upgraded to the authenticated ~/_matrix/client/v1/media/~ endpoints.
++ Mention detection now uses the ~m.mentions~ field (Matrix v1.7) instead of parsing message bodies for MXIDs.
++ Domainless room IDs (Matrix room version 12) are now accepted.
++ ~full_state~ is no longer forced to ~true~ on initial sync, preserving lazy-loading of room members (it was previously overriding ~lazy_load_members~, causing a full membership download on every first login).
+
+*Fixes*
+
++ Send a valid empty JSON object (~{}~) rather than an empty string as the request body when joining, leaving, or forgetting a room, which some homeservers rejected with ~M_BAD_JSON~.
++ Apply a message's bundled ~m.replace~ (edit) aggregation when the edit event itself isn't separately available, such as when paginating older history.  Previously, such messages were dropped from the timeline entirely rather than showing their edited content.
 
 ** 0.17
 

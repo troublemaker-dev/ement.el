@@ -70,7 +70,7 @@
                              ;; should be.  Sometimes the matrix.org homeserver
                              ;; can get slow and respond a minute or two later.
                              (connect-timeout 10) (timeout 60)
-                             (version "r0"))
+                             version)
   "Make API request on SESSION to ENDPOINT.
 The request automatically uses SESSION's server, URI prefix, and
 access token.
@@ -82,14 +82,17 @@ JSON-READ-FN (passed as AS), CONNECT-TIMEOUT, TIMEOUT.
 
 Other arguments include PARAMS (used as the URL's query
 parameters), ENDPOINT-CATEGORY (added to the endpoint URL), and
-VERSION (added to the endpoint URL).
+VERSION (added to the endpoint URL).  When VERSION is nil, it is
+resolved from the server's negotiated version (set at connect
+time), falling back to \"v3\".
 
 Note that most Matrix requests expect JSON-encoded data, so
 usually the DATA argument should be passed through
 `json-encode'."
   (declare (indent defun))
   (pcase-let* (((cl-struct ement-session server token) session)
-               ((cl-struct ement-server uri-prefix) server)
+               ((cl-struct ement-server uri-prefix negotiated-version) server)
+               (version (or version negotiated-version "v3"))
                ((cl-struct url type host portspec) (url-generic-parse-url uri-prefix))
                (path (format "/_matrix/%s/%s/%s" endpoint-category version endpoint))
                (query (url-build-query-string params))

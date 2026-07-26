@@ -36,9 +36,9 @@
 ;; that is so at expansion time, the expanded macro calls format the message and check the
 ;; log level at runtime, which is not zero-cost.
 
-;; (eval-and-compile
-;;   (setq-local warning-minimum-log-level nil)
-;;   (setq-local warning-minimum-log-level :debug))
+(eval-and-compile
+  (setq-local warning-minimum-log-level nil)
+  (setq-local warning-minimum-log-level :debug))
 
 ;;;; Requirements
 
@@ -191,6 +191,7 @@ keymap directly the issue may be visible.")
     (define-key map (kbd "<insert>") #'ement-room-dispatch-edit-message)
     (define-key map (kbd "C-k") #'ement-room-delete-message)
     (define-key map (kbd "s r") #'ement-room-send-reaction)
+    (define-key map (kbd "s t") #'ement-room-write-thread-reply)
     (define-key map (kbd "s e") #'ement-room-send-emote)
     (define-key map (kbd "s f") #'ement-room-send-file)
     (define-key map (kbd "s i") #'ement-room-send-image)
@@ -896,7 +897,7 @@ non-nil, set the variables buffer-locally (i.e. when called from
         ;; is required to avoid compilation warnings).
         (message "Ement: Kill and reopen room buffers to display in new format")))))
 
-(defcustom ement-room-message-format-spec "%S%L%B%r%R%t"
+(defcustom ement-room-message-format-spec "%S%L%B%r%H%R%t"
   "Format messages according to this spec.
 It may contain these specifiers:
 
@@ -906,6 +907,7 @@ It may contain these specifiers:
 
   %b  Message body (plain-text)
   %B  Message body (formatted if available)
+  %H  Thread summary (shown on thread-root messages)
   %i  Event ID
   %O  Room display name (used for mentions buffer)
   %r  Reactions
@@ -1386,6 +1388,11 @@ spec) without requiring all events to use the same margin width."
   (ignore session)
   (ement-room--format-reactions event room))
 
+(ement-room-define-event-formatter ?H
+  "Thread summary."
+  (ignore room session)
+  (ement-room--format-thread-summary event))
+
 (ement-room-define-event-formatter ?t
   "Timestamp."
   (ignore room session)
@@ -1824,11 +1831,11 @@ buffer).  It receives two arguments, the room and the session."
            ;; but it's not disallowed either)".  See
            ;; <https://matrix.to/#/!jxlRxnrZCsjpjDubDX:matrix.org/$Cnb53UQdYnGFizM49Aje_Xs0BxVdt-be7Dnm7_k-0ho>.
            (rx bos (or "#" "!") (1+ (not (any ":")))
-               ":" (1+ (or alnum (any "-."))))
+               (optional ":" (1+ (or alnum (any "-.")))))
            id-or-alias)
-    (user-error "Invalid room ID or alias (use, e.g. \"#ROOM-ALIAS:SERVER\")"))
+    (user-error "Invalid room ID or alias (use, e.g. \"!ROOMID\", \"!ROOMID:SERVER\", or \"#ALIAS:SERVER\")"))
   (let ((endpoint (format "join/%s" (url-hexify-string id-or-alias))))
-    (ement-api session endpoint :method 'post :data ""
+    (ement-api session endpoint :method 'post :data "{}"
       :then (lambda (data)
               ;; NOTE: This generates a symbol and sets its function value to a lambda
               ;; which removes the symbol from the hook, removing itself from the hook.
@@ -2120,13 +2127,17 @@ EVENT should be an `ement-event' or `ement-room-membership-events' struct."
      (compose-buffer #'ement-room-compose-send-direct)
      (t #'ement-room-compose-send))))
 
-(cl-defun ement-room-send-message (room session &key body formatted-body replying-to-event)
+(cl-defun ement-room-send-message (room session &key body formatted-body replying-to-event
+                                        thread-root-event)
   "Send message to ROOM on SESSION with BODY and FORMATTED-BODY.
 Interactively, with prefix, prompt for room and session,
 otherwise use current room.
 
 REPLYING-TO-EVENT may be an event the message is in reply to; the
 message will reference it appropriately.
+
+THREAD-ROOT-EVENT may be an event which is the root of a thread
+the message is being sent to; see `ement-send-message'.
 
 If `ement-room-send-message-filter' is non-nil, the message's
 content alist is passed through it before sending.  This may be
@@ -2140,7 +2151,8 @@ the content (e.g. see `ement-room-send-org-filter')."
                                             nil 'inherit-input-method))))
        (list ement-room ement-session :body body))))
   (ement-send-message room session :body body :formatted-body formatted-body
-    :replying-to-event replying-to-event :filter ement-room-send-message-filter
+    :replying-to-event replying-to-event :thread-root-event thread-root-event
+    :filter ement-room-send-message-filter
     :then #'ement-room-send-event-callback)
   ;; NOTE: This assumes that the selected window is the buffer's window.  For now
   ;; this is almost surely the case, but in the future, we might let the function
@@ -2306,6 +2318,29 @@ Interactively, to event at point."
         ;; NOTE: `ement-room-send-message' looks up the original event, so we pass `event'
         ;; as :replying-to-event.
         (ement-room-send-message room session :body body :replying-to-event event)))))
+
+(defun ement-room-write-thread-reply (event)
+  "Write and send a threaded reply to EVENT.
+If EVENT is already part of a thread, reply within that thread;
+otherwise start a new thread on EVENT.
+Interactively, to event at point."
+  (interactive (progn (cl-assert ement-ewoc)
+                      (list (ewoc-data (ewoc-locate ement-ewoc)))))
+  (cl-assert ement-room) (cl-assert ement-session) (cl-assert (ement-event-p event))
+  (let* ((thread-root-event (ement--thread-root-for event ement-session))
+         (ement-room-replying-to-event event))
+    (ement-room-with-highlighted-event-at (point)
+      (pcase-let* ((room ement-room)
+                   (session ement-session)
+                   (prompt (format "Send thread reply (%s): " (ement-room-display-name room)))
+                   (ement-room-read-string-setup-hook
+                    (lambda ()
+                      (setq-local ement-room-replying-to-event event)))
+                   (body (ement-room-with-typing
+                           (ement-room-read-string prompt nil 'ement-room-message-history
+                                                   nil 'inherit-input-method))))
+        (ement-room-send-message room session :body body
+          :replying-to-event event :thread-root-event thread-root-event)))))
 
 (when (assoc "emoji" input-method-alist)
   (defun ement-room-use-emoji-input-method ()
@@ -3235,10 +3270,13 @@ function to `ement-room-event-fns', which see."
   (with-silent-modifications
     (ement-room--insert-event event)))
 
+(declare-function ement--make-event "ement.el")
+(declare-function ement--put-event "ement.el")
 (ement-room-defevent "m.room.message"
   (pcase-let* (((cl-struct ement-event content unsigned) event)
                ((map ('m.relates_to (map ('rel_type rel-type) ('event_id replaces-event-id)))) content)
-               ((map ('m.relations (map ('m.replace (map ('event_id replaced-by-id)))))) unsigned))
+               ((map ('m.relations (map ('m.replace replacement)))) unsigned)
+               ((map ('event_id replaced-by-id)) replacement))
     (if (and ement-room-replace-edited-messages
              replaces-event-id (equal "m.replace" rel-type))
         ;; Event replaces existing event: find and replace it in buffer if possible, otherwise insert it.
@@ -3247,9 +3285,16 @@ function to `ement-room-event-fns', which see."
               (ement-debug "Unable to replace event ID: inserting instead." replaces-event-id)
               (ement-room--insert-event event)))
       ;; New event.
-      (if replaced-by-id
-          (ement-debug "Event replaced: not inserting." replaced-by-id)
-        ;; Not replaced: insert it.
+      (if-let (((and replaced-by-id ement-room-replace-edited-messages))
+               (replacement-event (ement--make-event replacement)))
+          ;; The server has already bundled the latest edit as an aggregation (e.g. when
+          ;; paginating history, where the edit event itself is typically not included in
+          ;; the response).  Insert the replacement directly instead of dropping this event
+          ;; and waiting for an edit event that may never arrive separately.
+          (progn
+            (ement--put-event replacement-event nil ement-session)
+            (ement-room--insert-event replacement-event))
+        ;; Not replaced, or replacement unusable: insert the original event.
         (ement-room--insert-event event)))))
 
 (ement-room-defevent "m.room.tombstone"
@@ -4048,6 +4093,18 @@ Formats according to `ement-room-message-format-spec', which see."
                  finally return (concat "\n  " (mapconcat #'format-reaction keys-senders "  ")))
       "")))
 
+(defun ement-room--format-thread-summary (event)
+  "Return formatted thread summary for EVENT, if it is a thread root."
+  ;; SPEC: <https://spec.matrix.org/latest/client-server-api/#server-side-aggregation-of-mthread-relationships>
+  (pcase-let* (((cl-struct ement-event unsigned) event)
+               ((map ('m.relations (map ('m.thread (map count ('current_user_participated participated-p)))))) unsigned))
+    (if count
+        (propertize (format "\n  %s %s in thread%s" count
+                            (if (= count 1) "reply" "replies")
+                            (if (eq t participated-p) " (joined)" ""))
+                    'face 'ement-room-reactions)
+      "")))
+
 (cl-defun ement-room--format-message (event room session &optional (format ement-room-message-format-spec))
   "Return EVENT in ROOM on SESSION formatted according to FORMAT.
 Format defaults to `ement-room-message-format-spec', which see."
@@ -4243,19 +4300,24 @@ HTML is rendered to Emacs text using `shr-insert-document'."
 (cl-defun ement-room--event-mentions-user-p (event user &optional (room ement-room))
   "Return non-nil if EVENT in ROOM mentions USER."
   (pcase-let* (((cl-struct ement-event content) event)
-               ((map body formatted_body) content)
+               ((map body formatted_body ('m\.mentions m-mentions)) content)
                (body (or formatted_body body)))
-    ;; FIXME: `ement--user-displayname-in' may not be returning the right result for the
-    ;; local user, so test the displayname slot too.  (But even that may be nil sometimes?
-    ;; Something needs to be fixed...)
-    ;; HACK: So we use the username slot, which was created just for this, for now.
-    (when body
-      (cl-macrolet ((matches-body-p
-                      (form) `(when-let ((string ,form))
-                                (string-match-p (regexp-quote string) body))))
-        (or (matches-body-p (ement-user-username user))
-            (matches-body-p (ement--user-displayname-in room user))
-            (matches-body-p (ement-user-id user)))))))
+    (if m-mentions
+        ;; Spec v1.7+: use structured m.mentions field when present.
+        (seq-contains-p (or (map-elt m-mentions 'user_ids) [])
+                        (ement-user-id user) #'equal)
+      ;; Fallback: body-text matching for messages from older clients.
+      ;; FIXME: `ement--user-displayname-in' may not be returning the right result for the
+      ;; local user, so test the displayname slot too.  (But even that may be nil sometimes?
+      ;; Something needs to be fixed...)
+      ;; HACK: So we use the username slot, which was created just for this, for now.
+      (when body
+        (cl-macrolet ((matches-body-p
+                        (form) `(when-let ((string ,form))
+                                  (string-match-p (regexp-quote string) body))))
+          (or (matches-body-p (ement-user-username user))
+              (matches-body-p (ement--user-displayname-in room user))
+              (matches-body-p (ement-user-id user))))))))
 
 (defun ement-room--linkify-urls (string)
   "Return STRING with URLs in it made clickable."

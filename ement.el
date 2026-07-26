@@ -44,10 +44,10 @@
 ;; that is so at expansion time, the expanded macro calls format the message and check the
 ;; log level at runtime, which is not zero-cost.
 
-;; (eval-and-compile
-;;   (require 'warnings)
-;;   (setq-local warning-minimum-log-level nil)
-;;   (setq-local warning-minimum-log-level :debug))
+ (eval-and-compile
+   (require 'warnings)
+   (setq-local warning-minimum-log-level nil)
+   (setq-local warning-minimum-log-level :debug))
 
 ;;;; Requirements
 
@@ -70,6 +70,9 @@
 
 (defvar ement-syncs nil
   "Alist of outstanding sync processes for each session.")
+
+(defvar ement-token-refresh-timers nil
+  "Alist of pending token-refresh timers, keyed by session object.")
 
 (defvar ement-users (make-hash-table :test #'equal)
   ;; NOTE: When changing the ement-user struct, it's necessary to
@@ -98,7 +101,7 @@ by users; ones who do so should know what they're doing.")
 
 (defvar ement-default-sync-filter
   '((room (state (lazy_load_members . t))
-          (timeline (lazy_load_members . t))))
+          (timeline (lazy_load_members . t) (unread_thread_notifications . t))))
   "Default filter for sync requests.")
 
 (defvar ement-images-queue (make-plz-queue :limit 5)
@@ -303,7 +306,7 @@ Ement: SSO login accepted; session token received.  Connecting to Matrix server.
                                          (when (process-live-p sso-server-process)
                                            (delete-process sso-server-process))))
                   (let ((url (concat (ement-server-uri-prefix (ement-session-server session))
-                                     "/_matrix/client/r0/login/sso/redirect?redirectUrl=http://localhost:"
+                                     "/_matrix/client/v3/login/sso/redirect?redirectUrl=http://localhost:"
                                      (number-to-string ement-sso-server-port))))
                     (funcall browse-url-secondary-browser-function url)
                     (message "Browsing to single sign-on page <%s>..." url)))
@@ -333,16 +336,21 @@ Ement: SSO login accepted; session token received.  Connecting to Matrix server.
       (if session
           ;; Start syncing given session.
           (let ((user-id (ement-user-id (ement-session-user session))))
-            ;; HACK: If session is already in ement-sessions, this replaces it.  I think that's okay...
-            (setf (alist-get user-id ement-sessions nil nil #'equal) session)
-            (ement--sync session :timeout ement-initial-sync-timeout))
+            (ement--negotiate-version session
+              (lambda ()
+                ;; HACK: If session is already in ement-sessions, this replaces it.  I think that's okay...
+                (setf (alist-get user-id ement-sessions nil nil #'equal) session)
+                (ement--schedule-token-refresh session)
+                (ement--sync session :timeout ement-initial-sync-timeout))))
         ;; Start password login flow.  Prompt for user ID and password
         ;; if not given (i.e. if not called interactively.)
         (unless user-id
           (setf user-id (read-string "User ID: " nil 'ement-connect-user-id-history)))
         (setf session (new-session))
-        (when (ement-api session "login" :then #'flows-callback)
-          (message "Ement: Checking server's login flows..."))))))
+        (ement--negotiate-version session
+          (lambda ()
+            (when (ement-api session "login" :then #'flows-callback)
+              (message "Ement: Checking server's login flows..."))))))))
 
 (defun ement-disconnect (sessions)
   "Disconnect from SESSIONS.
@@ -364,9 +372,12 @@ in them won't work."
         ;; allowing `plz--respond' to clean up the buffer, etc.
         (setf (process-get process :plz-else) #'ignore)
         (delete-process process))
+      (when-let ((timer (alist-get session ement-token-refresh-timers nil nil #'eq)))
+        (cancel-timer timer))
       ;; NOTE: I'd like to use `map-elt' here, but not until
       ;; <https://debbugs.gnu.org/cgi/bugreport.cgi?bug=47368> is fixed, I guess.
       (setf (alist-get session ement-syncs nil nil #'equal) nil
+            (alist-get session ement-token-refresh-timers nil 'remove #'eq) nil
             (alist-get user-id ement-sessions nil 'remove #'equal) nil)))
   (unless ement-sessions
     ;; HACK: If no sessions remain, clear the users table.  It might be best
@@ -389,10 +400,15 @@ Useful in, e.g. `ement-disconnect-hook', which see."
 (defun ement--login-callback (session data)
   "Record DATA from logging in to SESSION and do initial sync."
   (pcase-let* (((cl-struct ement-session (user (cl-struct ement-user (id user-id)))) session)
-               ((map ('access_token token) ('device_id device-id)) data))
+               ((map ('access_token token) ('device_id device-id)
+                     ('refresh_token refresh-token) ('expires_in_ms expires-in-ms)) data))
     (setf (ement-session-token session) token
           (ement-session-device-id session) device-id
+          (ement-session-refresh-token session) refresh-token
+          (ement-session-token-expires-at session) (when expires-in-ms
+                                                     (+ (float-time) (/ expires-in-ms 1000.0)))
           (alist-get user-id ement-sessions nil nil #'equal) session)
+    (ement--schedule-token-refresh session)
     (ement--sync session :timeout ement-initial-sync-timeout)))
 
 ;;;; Functions
@@ -450,11 +466,77 @@ To be called from `ement-disconnect-hook'."
    (secure-hash 'sha256 (prin1-to-string (list (current-time) (system-name))))
    :end 8 :radix 16))
 
+(defun ement--schedule-token-refresh (session)
+  "Schedule a token refresh for SESSION before its access token expires.
+Does nothing if SESSION has no refresh token or no known expiry time."
+  (when-let* ((refresh-token (ement-session-refresh-token session))
+              (expires-at (ement-session-token-expires-at session)))
+    (when-let ((existing (alist-get session ement-token-refresh-timers nil nil #'eq)))
+      (cancel-timer existing))
+    ;; Refresh 30 seconds before expiry; fire immediately if already past that point.
+    (let* ((delay (max 0 (- expires-at (float-time) 30)))
+           (timer (run-at-time delay nil #'ement--do-token-refresh session)))
+      (setf (alist-get session ement-token-refresh-timers nil nil #'eq) timer)
+      (ement-debug "Token refresh for <%s> scheduled in %.0f seconds"
+                   (ement-user-id (ement-session-user session)) delay))))
+
+(defun ement--do-token-refresh (session)
+  "Refresh the access token for SESSION via POST /refresh."
+  (if-let ((refresh-token (ement-session-refresh-token session)))
+      (progn
+        (ement-debug "Refreshing access token for <%s>" (ement-user-id (ement-session-user session)))
+        (ement-api session "refresh" :method 'post
+          :data (json-encode (ement-alist "refresh_token" refresh-token))
+          :then (apply-partially #'ement--token-refresh-callback session)
+          :else (lambda (err)
+                  (display-warning 'ement
+                    (format "Token refresh failed for session <%s>: %S"
+                            (ement-user-id (ement-session-user session)) err)
+                    :warning))))
+    (ement-debug "No refresh token for <%s>; skipping" (ement-user-id (ement-session-user session)))))
+
+(defun ement--token-refresh-callback (session data)
+  "Store refreshed credentials from DATA into SESSION and reschedule."
+  (pcase-let* (((map ('access_token token) ('refresh_token new-refresh-token)
+                     ('expires_in_ms expires-in-ms)) data))
+    (setf (ement-session-token session) token)
+    (when new-refresh-token
+      (setf (ement-session-refresh-token session) new-refresh-token))
+    (setf (ement-session-token-expires-at session)
+          (when expires-in-ms (+ (float-time) (/ expires-in-ms 1000.0))))
+    (ement-debug "Token refreshed for <%s>" (ement-user-id (ement-session-user session)))
+    (ement--schedule-token-refresh session)))
+
 (defsubst ement--sync-messages-p (session)
   "Return non-nil if sync-related messages should be shown for SESSION."
   ;; For now, this seems like the best way.
   (or (not (ement-session-has-synced-p session))
       (not ement-auto-sync)))
+
+(defun ement--negotiate-version (session then)
+  "Negotiate the server API version for SESSION asynchronously, then call THEN.
+THEN is a function of no arguments called after negotiation succeeds or
+fails.  On success, sets the `negotiated-version' slot on SESSION's server
+struct to \"v3\" (if the server advertises any v1.N spec version) or \"r0\"
+(legacy).  On failure, leaves the slot nil so `ement-api' falls back to
+\"v3\"."
+  (pcase-let* (((cl-struct ement-session server) session)
+               ((cl-struct ement-server uri-prefix) server)
+               (url (concat uri-prefix "/_matrix/client/versions")))
+    (message "Ement: Negotiating server API version...")
+    (plz 'get url :as #'json-read
+      :then (lambda (data)
+              (let* ((versions (append (map-elt data 'versions) nil))
+                     (negotiated (if (cl-some (lambda (v)
+                                                (string-match-p (rx bos "v1." (1+ digit) eos) v))
+                                              versions)
+                                     "v3" "r0")))
+                (setf (ement-server-negotiated-version server) negotiated)
+                (ement-debug "Server versions: %S; negotiated prefix: %s" versions negotiated)
+                (funcall then)))
+      :else (lambda (_err)
+              (ement-debug "Server version negotiation failed; ement-api will use \"v3\" fallback")
+              (funcall then)))))
 
 (defun ement--hostname-uri (hostname)
   "Return the \".well-known\" URI for server HOSTNAME.
@@ -518,7 +600,7 @@ a filter ID).  When unspecified, the value of
       (user-error "Ement: Already syncing this session")))
   (pcase-let* (((cl-struct ement-session next-batch) session)
                (params (remove
-                        nil (list (list "full_state" (if next-batch "false" "true"))
+                        nil (list (list "full_state" "false")
                                   (when filter
                                     ;; TODO: Document filter arg.
                                     (list "filter" (json-encode filter)))
@@ -581,7 +663,7 @@ Runs `ement-sync-callback-hook' with SESSION."
   (setf (map-elt ement-syncs session) nil)
   (pcase-let* (((map rooms ('next_batch next-batch) ('account_data (map ('events account-data-events))))
                 data)
-               ((map ('join joined-rooms) ('invite invited-rooms) ('leave left-rooms)) rooms)
+               ((map ('join joined-rooms) ('invite invited-rooms) ('knock knocked-rooms) ('leave left-rooms)) rooms)
                (num-events (+
                             ;; HACK: In `ement--push-joined-room-events', we do something
                             ;; with each event 3 times, so we multiply this by 3.
@@ -606,6 +688,8 @@ Runs `ement-sync-callback-hook' with SESSION."
       (mapc (apply-partially #'ement--push-left-room-events session) left-rooms)
       ;; Invited rooms.
       (mapc (apply-partially #'ement--push-invite-room-events session) invited-rooms)
+      ;; Knocked rooms.
+      (mapc (apply-partially #'ement--push-knock-room-events session) knocked-rooms)
       ;; Joined rooms.
       (mapc (apply-partially #'ement--push-joined-room-events session) joined-rooms))
     ;; TODO: Process "left" rooms (remove room structs, etc).
@@ -633,6 +717,21 @@ Runs `ement-sync-callback-hook' with SESSION."
   "Push events for INVITED-ROOM into that room in SESSION."
   ;; TODO: Make ement-session-rooms a hash-table.
   (ement--push-joined-room-events session invited-room 'invite))
+
+(defun ement--push-knock-room-events (session knocked-room)
+  "Push knock_state events for KNOCKED-ROOM into that room in SESSION."
+  (pcase-let* ((`(,id . ,event-types) knocked-room)
+               (id (symbol-name id))
+               (room (or (cl-find-if (lambda (room)
+                                       (equal id (ement-room-id room)))
+                                     (ement-session-rooms session))
+                         (car (push (make-ement-room :id id) (ement-session-rooms session)))))
+               ((map ('knock_state (map ('events knock-state-events)))) event-types))
+    (setf (ement-room-status room) 'knock)
+    (cl-loop for event across-ref knock-state-events do
+             (setf event (ement--make-event event))
+             (push event (ement-room-invite-state room))
+             (run-hook-with-args 'ement-event-hook event room session))))
 
 (defun ement--auto-sync (session)
   "If `ement-auto-sync' is non-nil, sync SESSION again."
@@ -687,11 +786,13 @@ Also used for left rooms, in which case STATUS should be set to
                ((map summary state ephemeral timeline
                      ('invite_state (map ('events invite-state-events)))
                      ('account_data (map ('events account-data-events)))
-                     ('unread_notifications unread-notifications))
+                     ('unread_notifications unread-notifications)
+                     ('unread_thread_notifications unread-thread-notifications))
                 event-types)
                (latest-timestamp))
     (setf (ement-room-status room) status
-          (ement-room-unread-notifications room) unread-notifications)
+          (ement-room-unread-notifications room) unread-notifications
+          (ement-room-unread-thread-notifications room) unread-thread-notifications)
     ;; NOTE: The idea is that, assuming that events in the sync response are in
     ;; chronological order, we push them to the lists in the room slots in that order,
     ;; leaving the head of each list as the most recent event of that type.  That means
@@ -941,10 +1042,8 @@ and `session' to the session.  Adds function to
     ;; means that, if a user has them disabled and then reenables them, they will
     ;; likely need to reconnect to cause them to be displayed in most rooms.
     (if-let ((url (alist-get 'url (ement-event-content event))))
-        (plz-run
-         (plz-queue ement-images-queue
-           'get (ement--mxc-to-url url session) :as 'binary :noquery t
-           :then (lambda (data)
+        (ement--media-request url session :queue ement-images-queue :as 'binary
+          :then (lambda (data)
                    (when ement-room-avatars
                      ;; MAYBE: Store the raw image data instead of using create-image here.
                      (let ((image (create-image data nil 'data-p
@@ -969,7 +1068,7 @@ and `session' to the session.  Adds function to
                                (alist-get 'room-list-avatar (ement-room-local room)) nil)))))))
       ;; Unset avatar.
       (setf (ement-room-avatar room) nil
-            (alist-get 'room-list-avatar (ement-room-local room)) nil))))
+            (alist-get 'room-list-avatar (ement-room-local room)) nil)))
 
 (ement-defevent "m.room.create"
   (ignore session)

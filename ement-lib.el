@@ -225,7 +225,7 @@ struct, or a room ID or alias string."
   (when (or force-p (yes-or-no-p (format "Leave room %s? " (ement--format-room room))))
     (pcase-let* (((cl-struct ement-room id) room)
                  (endpoint (format "rooms/%s/leave" (url-hexify-string id))))
-      (ement-api session endpoint :method 'post :data ""
+      (ement-api session endpoint :method 'post :data "{}"
         :then (lambda (_data)
                 (when ement-room-leave-kill-buffer
                   ;; NOTE: This generates a symbol and sets its function value to a lambda
@@ -278,7 +278,7 @@ when necessary, and forget the room without prompting."
                (user-error "Room %s is joined (must be left before forgetting)"
                            (ement--format-room room))))
       ('leave (when (or force-p (yes-or-no-p (format "Forget room \"%s\" (%s)? " display-name id)))
-                (ement-api session endpoint :method 'post :data ""
+                (ement-api session endpoint :method 'post :data "{}"
                   :then (lambda (_data)
                           ;; NOTE: The spec does not seem to indicate that the action of forgetting
                           ;; a room is synced to other clients, so it seems that we need to remove
@@ -308,6 +308,29 @@ If UNIGNORE-P (interactively, with prefix), un-ignore USER."
       :then (lambda (data)
               (ement-debug "PUT successful" data)
               (message "Ement: User %s %s." user-id (if unignore-p "unignored" "ignored"))))))
+
+(defun ement-room-knock (room-or-id session &optional reason)
+  "Knock on ROOM-OR-ID on SESSION, requesting entry.
+ROOM-OR-ID may be an `ement-room' struct or a room ID/alias string.
+REASON, if non-nil, is sent with the knock request."
+  (interactive
+   (let* ((session (ement-complete-session))
+          (room-or-id (read-string "Room to knock on (ID or alias): "))
+          (reason (read-string "Reason (optional, RET to skip): ")))
+     (list room-or-id session (unless (string-empty-p reason) reason))))
+  (let ((room-id-or-alias (cl-etypecase room-or-id
+                            (ement-room (ement-room-id room-or-id))
+                            (string room-or-id))))
+    (ement-api session (format "knock/%s" (url-hexify-string room-id-or-alias))
+      :method 'post
+      :data (if reason (json-encode (ement-alist "reason" reason)) "{}")
+      :then (lambda (_data)
+              (ement-message "Knocked on room: %s" room-id-or-alias))
+      :else (lambda (plz-error)
+              (pcase-let* (((cl-struct plz-error response) plz-error)
+                           ((cl-struct plz-response status body) response)
+                           ((map error) (ignore-errors (json-read-from-string body))))
+                (error "Unable to knock on room %s: %s %s" room-id-or-alias status error))))))
 
 (defun ement-invite-user (user-id room session)
   "Invite USER-ID to ROOM on SESSION.
@@ -584,10 +607,7 @@ otherwise use current room."
 
 ;;;;;; Push rules
 
-;; NOTE: Although v1.4 of the spec is available and describes setting the push rules using
-;; the "v3" API endpoint, the Element client continues to use the "r0" endpoint, which is
-;; slightly different.  This implementation will follow Element's initially, because the
-;; spec is not simple, and imitating Element's requests will make it easier.
+;; NOTE: Push rules use the "v3" API endpoint per the current spec.
 
 (defun ement-room-notification-state (room session)
   "Return notification state for ROOM on SESSION.
@@ -682,11 +702,11 @@ default, `all', `mentions-and-keywords', or `none'."
                                        ;; Setting rules requires PUTting the rules, then making a second
                                        ;; request to enable them.
                                        (lambda (_data)
-                                         (ement-api session (concat endpoint "/enabled") :queue queue :version "r0"
+                                         (ement-api session (concat endpoint "/enabled") :queue queue :version "v3"
                                            :method 'put :data (json-encode (ement-alist 'enabled t))
                                            :then message-fn))
                                      message-fn)))
-                  (ement-api session endpoint :queue queue :method method :version "r0"
+                  (ement-api session endpoint :queue queue :method method :version "v3"
                     :data (json-encode rule)
                     :then then
                     :else (lambda (plz-error)
@@ -765,8 +785,7 @@ body."
   "Upload DATA with FILENAME to content repository on SESSION.
 THEN and ELSE are passed to `ement-api', which see."
   (declare (indent defun))
-  (ement-api session "upload" :method 'post :endpoint-category "media"
-    ;; NOTE: Element currently uses "r0" not "v3", so so do we.
+  (ement-api session "media/upload" :method 'post :version "v1"
     :params (when filename
               (list (list "filename" filename)))
     :content-type content-type :data data :data-type 'binary
@@ -1077,9 +1096,12 @@ period, anywhere in the body."
 
 (defun ement--event-mentions-room-p (event &rest _ignore)
   "Return non-nil if EVENT mentions \"@room\"."
-  (pcase-let (((cl-struct ement-event (content (map body))) event))
-    (when body
-      (string-match-p (rx (or space bos) "@room" eow) body))))
+  (pcase-let (((cl-struct ement-event (content (map body ('m\.mentions m-mentions)))) event))
+    (cond
+     ;; Spec v1.7+: use structured m.mentions.room when present.
+     (m-mentions (eq t (map-elt m-mentions 'room)))
+     ;; Fallback: body-text matching for messages from older clients.
+     (body (string-match-p (rx (or space bos) "@room" eow) body)))))
 
 (cl-defun ement-complete-room (&key session (predicate #'identity)
                                     (prompt "Room: ") (suggest t))
@@ -1112,7 +1134,8 @@ suggested room."
     (alist-get selected-name name-to-room-session nil nil #'string=)))
 
 (cl-defun ement-send-message (room session
-                                   &key body formatted-body replying-to-event filter then)
+                                   &key body formatted-body replying-to-event thread-root-event
+                                   filter then)
   "Send message to ROOM on SESSION with BODY and FORMATTED-BODY.
 THEN may be a function to call after the event is sent
 successfully.  It is called with keyword arguments for ROOM,
@@ -1120,6 +1143,12 @@ SESSION, CONTENT, and DATA.
 
 REPLYING-TO-EVENT may be an event the message is
 in reply to; the message will reference it appropriately.
+
+THREAD-ROOT-EVENT may be an event which is the root of a thread
+the message is being sent to (see `ement--thread-root-for');
+REPLYING-TO-EVENT, if also given, is used as the rich-reply
+fallback target within the thread, otherwise THREAD-ROOT-EVENT
+is used.
 
 FILTER may be a function through which to pass the message's
 content object before sending (see,
@@ -1141,9 +1170,13 @@ e.g. `ement-room-send-org-filter')."
                (then (or then #'ignore)))
     (when filter
       (setf content (funcall filter content room)))
-    (when replying-to-event
+    (cond
+     (thread-root-event
+      (setf replying-to-event (ement--original-event-for (or replying-to-event thread-root-event) session)
+            content (ement--add-thread content thread-root-event replying-to-event room)))
+     (replying-to-event
       (setf replying-to-event (ement--original-event-for replying-to-event session)
-            content (ement--add-reply content replying-to-event room)))
+            content (ement--add-reply content replying-to-event room))))
     (ement-api session endpoint :method 'put :data (json-encode content)
       :then (apply-partially then :room room :session session
                              ;; Data is added when calling back.
@@ -1211,6 +1244,34 @@ DATA is an unsent message event's data alist."
                                     "format" "org.matrix.custom.html")
                        data))
     data))
+
+(defun ement--add-thread (data thread-root-event replying-to-event room)
+  "Return DATA adding an `m.thread' relation to THREAD-ROOT-EVENT in ROOM.
+REPLYING-TO-EVENT is quoted as a rich-reply fallback, per the
+Matrix spec's recommendation for clients that don't understand
+threads (see `ement--add-reply')."
+  ;; SPEC: <https://spec.matrix.org/latest/client-server-api/#fallback-for-unthreaded-clients>
+  (setf data (ement--add-reply data replying-to-event room)
+        (alist-get "m.relates_to" data nil nil #'string=)
+        (append (ement-alist "rel_type" "m.thread"
+                             "event_id" (ement-event-id thread-root-event))
+                (alist-get "m.relates_to" data nil nil #'string=)))
+  data)
+
+(defun ement--thread-root-for (event session)
+  "Return the thread root event for EVENT in SESSION.
+If EVENT is a reply within a thread (i.e. has an `m.thread'
+relation), return the thread's root event (looked up in
+SESSION's events table, or an ersatz one with the expected ID if
+not found).  Otherwise, return EVENT itself, since any event
+without a relation may become a thread root."
+  (pcase-let (((cl-struct ement-event
+                          (content (map ('m.relates_to (map ('event_id root-id) ('rel_type relation-type))))))
+               event))
+    (if (equal relation-type "m.thread")
+        (or (gethash root-id (ement-session-events session))
+            (make-ement-event :id root-id))
+      event)))
 
 (defun ement--direct-room-for-user (user session)
   "Return last-modified direct room with USER on SESSION, if one exists."
@@ -1564,7 +1625,8 @@ non-zero unread notification counts; or if its fully-read marker
 is not at the latest known message event."
   ;; Roughly equivalent to the "red/gray/bold/idle" states listed in
   ;; <https://github.com/matrix-org/matrix-react-sdk/blob/b0af163002e8252d99b6d7075c83aadd91866735/docs/room-list-store.md#list-ordering-algorithm-importance>.
-  (pcase-let* (((cl-struct ement-room timeline account-data unread-notifications receipts
+  (pcase-let* (((cl-struct ement-room timeline account-data unread-notifications
+                           unread-thread-notifications receipts
                            (local (map buffer)))
                 room)
                ((cl-struct ement-session user) session)
@@ -1579,6 +1641,10 @@ is not at the latest known message event."
         (and unread-notifications
              (or (not (zerop notification_count))
                  (not (zerop highlight_count))))
+        (cl-loop for (nil . thread-counts) in unread-thread-notifications
+                 thereis (pcase-let (((map notification_count highlight_count) thread-counts))
+                           (or (not (zerop (or notification_count 0)))
+                               (not (zerop (or highlight_count 0))))))
         ;; NOTE: This is *WAY* too complicated, but it seems roughly equivalent to doesRoomHaveUnreadMessages() from
         ;; <https://github.com/matrix-org/matrix-react-sdk/blob/7fa01ffb068f014506041bce5f02df4f17305f02/src/Unread.ts#L52>.
         (when (and (not ement-room-unread-only-counts-notifications)

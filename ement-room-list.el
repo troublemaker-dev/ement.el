@@ -176,6 +176,11 @@ Set automatically when `ement-room-list-mode' is activated.")
   "Invited rooms."
   :group 'ement-room-list-faces)
 
+(defface ement-room-list-knocked
+  '((t (:inherit (italic ement-room-list-name))))
+  "Rooms where the user has knocked and is awaiting entry."
+  :group 'ement-room-list-faces)
+
 (defface ement-room-list-left
   '((t (:strike-through t :inherit ement-room-list-name)))
   "Left rooms."
@@ -228,6 +233,7 @@ from recent to non-recent for rooms updated in the past hour."
                 (pcase membership
                   ('join "Joined")
                   ('invite "Invited")
+                  ('knock "Knocked")
                   ('leave "[Left]"))))
     (pcase-let ((`[,(cl-struct ement-room (status membership)) ,_session] item))
       (if status
@@ -460,6 +466,8 @@ from recent to non-recent for rooms updated in the past hour."
           (pcase (ement-room-status room)
             ('invite
              (push 'ement-room-list-invited (map-elt face :inherit)))
+            ('knock
+             (push 'ement-room-list-knocked (map-elt face :inherit)))
             ('leave
              (push 'ement-room-list-left (map-elt face :inherit))))
           (ement-propertize display-name
@@ -512,6 +520,9 @@ from recent to non-recent for rooms updated in the past hour."
       ('invite (concat (ement-propertize "[invited]"
                          'face 'ement-room-list-invited)
                        " " topic))
+      ('knock (concat (ement-propertize "[knocking]"
+                        'face 'ement-room-list-knocked)
+                      " " topic))
       ('leave (concat (ement-propertize "[left]"
                         'face 'ement-room-list-left)
                       " " topic))
@@ -655,6 +666,9 @@ DISPLAY-BUFFER-ACTION is nil, the buffer is not displayed."
                 (item-invited-p (item)
                   (pcase-let ((`[,(cl-struct ement-room status) ,_session] item))
                     (equal 'invite status)))
+                (item-knocked-p (item)
+                  (pcase-let ((`[,(cl-struct ement-room status) ,_session] item))
+                    (equal 'knock status)))
                 (taxy-latest-ts (taxy)
                   (apply #'max most-negative-fixnum
                          (delq nil
@@ -703,6 +717,7 @@ DISPLAY-BUFFER-ACTION is nil, the buffer is not displayed."
                            (taxy-fill room-session-vectors)
                            (taxy-sort #'> #'item-latest-ts)
                            (taxy-sort #'t<nil #'item-invited-p)
+                           (taxy-sort #'t<nil #'item-knocked-p)
                            (taxy-sort #'t<nil #'item-favourite-p)
                            (taxy-sort #'t>nil #'item-low-priority-p)
                            (taxy-sort #'t<nil #'item-unread-p)
@@ -718,6 +733,7 @@ DISPLAY-BUFFER-ACTION is nil, the buffer is not displayed."
                            (taxy-sort* #'t<nil (first-item item-unread-p))
                            (taxy-sort* #'t<nil (first-item item-favourite-p))
                            (taxy-sort* #'t<nil (first-item item-invited-p))
+                           (taxy-sort* #'t<nil (first-item item-knocked-p))
                            (taxy-sort* #'t>nil (first-item item-space-p))
                            (taxy-sort* #'t>nil (name= "Low-priority"))
                            (taxy-sort* #'t>nil (first-item item-left-p)))))

@@ -59,18 +59,21 @@
   local)
 
 (cl-defstruct ement-server
-  name uri-prefix)
+  name uri-prefix
+  (negotiated-version nil :documentation "API URL version prefix negotiated at connect time (e.g. \"v3\" or \"r0\")."))
 
 (cl-defstruct ement-session
   user server token transaction-id rooms next-batch
   device-id initial-device-display-name has-synced-p
   account-data
+  refresh-token
+  (token-expires-at nil :documentation "Float-time at which the access token expires, or nil if unknown.")
   ;; Hash table of all seen events, keyed on event ID.
   events)
 
 (cl-defstruct ement-room
   id display-name prev-batch
-  summary state timeline ephemeral account-data unread-notifications
+  summary state timeline ephemeral account-data unread-notifications unread-thread-notifications
   latest-ts topic canonical-alias avatar status type invite-state
   (members (make-hash-table :test #'equal) :documentation "Hash table mapping joined user IDs to user structs.")
   ;; The local slot is an alist used by the local client only.
