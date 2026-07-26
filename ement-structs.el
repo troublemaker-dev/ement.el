@@ -73,7 +73,7 @@
 
 (cl-defstruct ement-room
   id display-name prev-batch
-  summary state timeline ephemeral account-data unread-notifications
+  summary state timeline ephemeral account-data unread-notifications unread-thread-notifications
   latest-ts topic canonical-alias avatar status type invite-state
   (members (make-hash-table :test #'equal) :documentation "Hash table mapping joined user IDs to user structs.")
   ;; The local slot is an alist used by the local client only.

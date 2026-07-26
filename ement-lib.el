@@ -1134,7 +1134,8 @@ suggested room."
     (alist-get selected-name name-to-room-session nil nil #'string=)))
 
 (cl-defun ement-send-message (room session
-                                   &key body formatted-body replying-to-event filter then)
+                                   &key body formatted-body replying-to-event thread-root-event
+                                   filter then)
   "Send message to ROOM on SESSION with BODY and FORMATTED-BODY.
 THEN may be a function to call after the event is sent
 successfully.  It is called with keyword arguments for ROOM,
@@ -1142,6 +1143,12 @@ SESSION, CONTENT, and DATA.
 
 REPLYING-TO-EVENT may be an event the message is
 in reply to; the message will reference it appropriately.
+
+THREAD-ROOT-EVENT may be an event which is the root of a thread
+the message is being sent to (see `ement--thread-root-for');
+REPLYING-TO-EVENT, if also given, is used as the rich-reply
+fallback target within the thread, otherwise THREAD-ROOT-EVENT
+is used.
 
 FILTER may be a function through which to pass the message's
 content object before sending (see,
@@ -1163,9 +1170,13 @@ e.g. `ement-room-send-org-filter')."
                (then (or then #'ignore)))
     (when filter
       (setf content (funcall filter content room)))
-    (when replying-to-event
+    (cond
+     (thread-root-event
+      (setf replying-to-event (ement--original-event-for (or replying-to-event thread-root-event) session)
+            content (ement--add-thread content thread-root-event replying-to-event room)))
+     (replying-to-event
       (setf replying-to-event (ement--original-event-for replying-to-event session)
-            content (ement--add-reply content replying-to-event room)))
+            content (ement--add-reply content replying-to-event room))))
     (ement-api session endpoint :method 'put :data (json-encode content)
       :then (apply-partially then :room room :session session
                              ;; Data is added when calling back.
@@ -1233,6 +1244,34 @@ DATA is an unsent message event's data alist."
                                     "format" "org.matrix.custom.html")
                        data))
     data))
+
+(defun ement--add-thread (data thread-root-event replying-to-event room)
+  "Return DATA adding an `m.thread' relation to THREAD-ROOT-EVENT in ROOM.
+REPLYING-TO-EVENT is quoted as a rich-reply fallback, per the
+Matrix spec's recommendation for clients that don't understand
+threads (see `ement--add-reply')."
+  ;; SPEC: <https://spec.matrix.org/latest/client-server-api/#fallback-for-unthreaded-clients>
+  (setf data (ement--add-reply data replying-to-event room)
+        (alist-get "m.relates_to" data nil nil #'string=)
+        (append (ement-alist "rel_type" "m.thread"
+                             "event_id" (ement-event-id thread-root-event))
+                (alist-get "m.relates_to" data nil nil #'string=)))
+  data)
+
+(defun ement--thread-root-for (event session)
+  "Return the thread root event for EVENT in SESSION.
+If EVENT is a reply within a thread (i.e. has an `m.thread'
+relation), return the thread's root event (looked up in
+SESSION's events table, or an ersatz one with the expected ID if
+not found).  Otherwise, return EVENT itself, since any event
+without a relation may become a thread root."
+  (pcase-let (((cl-struct ement-event
+                          (content (map ('m.relates_to (map ('event_id root-id) ('rel_type relation-type))))))
+               event))
+    (if (equal relation-type "m.thread")
+        (or (gethash root-id (ement-session-events session))
+            (make-ement-event :id root-id))
+      event)))
 
 (defun ement--direct-room-for-user (user session)
   "Return last-modified direct room with USER on SESSION, if one exists."
@@ -1586,7 +1625,8 @@ non-zero unread notification counts; or if its fully-read marker
 is not at the latest known message event."
   ;; Roughly equivalent to the "red/gray/bold/idle" states listed in
   ;; <https://github.com/matrix-org/matrix-react-sdk/blob/b0af163002e8252d99b6d7075c83aadd91866735/docs/room-list-store.md#list-ordering-algorithm-importance>.
-  (pcase-let* (((cl-struct ement-room timeline account-data unread-notifications receipts
+  (pcase-let* (((cl-struct ement-room timeline account-data unread-notifications
+                           unread-thread-notifications receipts
                            (local (map buffer)))
                 room)
                ((cl-struct ement-session user) session)
@@ -1601,6 +1641,10 @@ is not at the latest known message event."
         (and unread-notifications
              (or (not (zerop notification_count))
                  (not (zerop highlight_count))))
+        (cl-loop for (nil . thread-counts) in unread-thread-notifications
+                 thereis (pcase-let (((map notification_count highlight_count) thread-counts))
+                           (or (not (zerop (or notification_count 0)))
+                               (not (zerop (or highlight_count 0))))))
         ;; NOTE: This is *WAY* too complicated, but it seems roughly equivalent to doesRoomHaveUnreadMessages() from
         ;; <https://github.com/matrix-org/matrix-react-sdk/blob/7fa01ffb068f014506041bce5f02df4f17305f02/src/Unread.ts#L52>.
         (when (and (not ement-room-unread-only-counts-notifications)

@@ -101,7 +101,7 @@ by users; ones who do so should know what they're doing.")
 
 (defvar ement-default-sync-filter
   '((room (state (lazy_load_members . t))
-          (timeline (lazy_load_members . t))))
+          (timeline (lazy_load_members . t) (unread_thread_notifications . t))))
   "Default filter for sync requests.")
 
 (defvar ement-images-queue (make-plz-queue :limit 5)
@@ -786,11 +786,13 @@ Also used for left rooms, in which case STATUS should be set to
                ((map summary state ephemeral timeline
                      ('invite_state (map ('events invite-state-events)))
                      ('account_data (map ('events account-data-events)))
-                     ('unread_notifications unread-notifications))
+                     ('unread_notifications unread-notifications)
+                     ('unread_thread_notifications unread-thread-notifications))
                 event-types)
                (latest-timestamp))
     (setf (ement-room-status room) status
-          (ement-room-unread-notifications room) unread-notifications)
+          (ement-room-unread-notifications room) unread-notifications
+          (ement-room-unread-thread-notifications room) unread-thread-notifications)
     ;; NOTE: The idea is that, assuming that events in the sync response are in
     ;; chronological order, we push them to the lists in the room slots in that order,
     ;; leaving the head of each list as the most recent event of that type.  That means
