@@ -202,6 +202,7 @@ keymap directly the issue may be visible.")
     (define-key map (kbd "u RET") #'ement-send-direct-message)
     (define-key map (kbd "u i") #'ement-invite-user)
     (define-key map (kbd "u I") #'ement-ignore-user)
+    (define-key map (kbd "u m") #'ement-mutual-rooms)
 
     ;; Room
     (define-key map (kbd "M-s o") #'ement-room-occur)
@@ -266,8 +267,16 @@ makes a best effort to keep it accurate.")
       (define-key map "s" 'emoji-search))
     (when (assoc "emoji" input-method-alist)
       (define-key map "m" 'ement-room-use-emoji-input-method))
+    (define-key map "r" #'ement-room-insert-recent-emoji)
     map)
   "Keymap used in `ement-room-send-reaction'.")
+
+(defvar ement-room--reaction-session nil
+  "Session dynamically bound while picking a reaction key.
+Set by `ement-room-send-reaction' around its picker invocation
+so that picker commands (e.g. `ement-room-insert-recent-emoji')
+running in the minibuffer can still access the originating room's
+session, since `ement-session' is buffer-local to the room buffer.")
 
 (defvar ement-room-sender-in-headers nil
   "Non-nil when sender is displayed in headers.
@@ -2348,6 +2357,16 @@ Interactively, to event at point."
     (interactive)
     (set-input-method "emoji")))
 
+(defun ement-room-insert-recent-emoji ()
+  "Insert a recently-used emoji at point.
+Prompts among the session's `m.recent_emoji' account data (MSC4356),
+most recently used first.  See `ement-room--reaction-session'."
+  (interactive)
+  (if-let* ((session ement-room--reaction-session)
+            (recent (ement--recent-emoji session)))
+      (insert (completing-read "Recent emoji: " recent nil t))
+    (user-error "No recent emoji recorded yet")))
+
 (defun ement-room-send-reaction (key position &optional event)
   "Send reaction of KEY to event at POSITION.
 KEY should be a reaction string, e.g. \"👍\".
@@ -2362,7 +2381,8 @@ these all require at least version 29 of Emacs):
 
 \\{ement-room-reaction-map}"
   (interactive
-   (let ((event (ewoc-data (ewoc-locate ement-ewoc))))
+   (let ((event (ewoc-data (ewoc-locate ement-ewoc)))
+         (ement-room--reaction-session ement-session))
      (unless (ement-event-p event)
        (user-error "No event at point"))
      (list (minibuffer-with-setup-hook
@@ -2396,9 +2416,12 @@ these all require at least version 29 of Emacs):
                                                     "event_id" event-id
                                                     "key" key))))
       (ement-api ement-session endpoint :method 'put :data (json-encode content)
-        :then (apply-partially #'ement-room-send-event-callback
-                               :room ement-room :session ement-session :content content
-                               :data)))))
+        :then (let ((room ement-room)
+                    (session ement-session))
+                (lambda (data)
+                  (ement--update-recent-emoji session key)
+                  (ement-room-send-event-callback
+                   :room room :session session :content content :data data)))))))
 
 (defun ement-room-toggle-reaction (key event room session)
   "Toggle reaction of KEY to EVENT in ROOM on SESSION."
@@ -5914,7 +5937,8 @@ For use in `completion-at-point-functions'."
              ["Users"
               ("u RET" "Send direct message" ement-send-direct-message)
               ("u i" "Invite user" ement-invite-user)
-              ("u I" "Ignore user" ement-ignore-user)]]
+              ("u I" "Ignore user" ement-ignore-user)
+              ("u m" "Mutual rooms with user" ement-mutual-rooms)]]
   [:pad-keys t
              ["Room"
               ("M-s o" "Occur search in room" ement-room-occur)

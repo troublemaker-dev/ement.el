@@ -143,6 +143,7 @@ Ement.el is intended to be installed with Emacs's package system, which will ens
    - ~ement-room-occur~ to search in a room's known events.
    - ~ement-room-override-name~ to override a room's display name.
    - ~ement-ignore-user~ to ignore a user (or with interactive prefix, un-ignore).
+   - ~ement-mutual-rooms~ to list rooms in common with another user.
    - ~ement-room-set-message-format~ to set a room's message format buffer-locally.
    - ~ement-room-toggle-space~ to toggle a room's membership in a space (a way to group rooms in Matrix).
    - ~ement-directory~ to view a room directory.
@@ -212,6 +213,7 @@ Note that if global minor mode ~ement-room-self-insert-mode~ is enabled (by defa
 + Send direct message: ~u RET~
 + Invite user: ~u i~
 + Ignore user: ~u I~
++ Mutual rooms with user: ~u m~
 
 *Room*
 
@@ -300,7 +302,7 @@ Ement.el doesn't support encrypted rooms natively, but it can be used transparen
 
 ** 0.18-pre
 
-This release upgrades Ement.el's Matrix protocol support from r0.6.1 toward v1.17.
+This release upgrades Ement.el's Matrix protocol support from r0.6.1 toward v1.19.
 
 *Additions*
 
@@ -308,6 +310,9 @@ This release upgrades Ement.el's Matrix protocol support from r0.6.1 toward v1.1
 + Server version negotiation: ~GET /_matrix/client/versions~ is queried at login/sync time, and the negotiated version is used for subsequent API calls (falling back to ~v3~).
 + Access token refresh: refresh tokens are stored and used to automatically renew an expiring access token.
 + Room knocking support (Matrix v1.1+).
++ Server capabilities (~GET /_matrix/client/v3/capabilities~) are fetched after login/reconnect (Matrix v1.1+).
++ Recently-used emoji are tracked via the ~m.recent_emoji~ account data event (Matrix v1.18/MSC4356) and offered as a picker (bound to ~r~ in the reaction picker, e.g. ~s r r~).
++ Command ~ement-mutual-rooms~ (bound to ~u m~), which lists rooms in common with another user via ~GET /_matrix/client/v1/mutual_rooms~ (Matrix v1.19/MSC2666).
 
 *Changes*
 
@@ -316,6 +321,8 @@ This release upgrades Ement.el's Matrix protocol support from r0.6.1 toward v1.1
 + Mention detection now uses the ~m.mentions~ field (Matrix v1.7) instead of parsing message bodies for MXIDs.
 + Domainless room IDs (Matrix room version 12) are now accepted.
 + ~full_state~ is no longer forced to ~true~ on initial sync, preserving lazy-loading of room members (it was previously overriding ~lazy_load_members~, causing a full membership download on every first login).
++ ~ement-forget-room~ no longer sends a redundant ~/forget~ request when the server advertises the ~m.forget_forced_upon_leave~ capability (Matrix v1.18/MSC4267), since such servers already forget a room automatically once it's left.
++ API errors with ~M_USER_SUSPENDED~, ~M_USER_LOCKED~, or ~M_USER_LIMIT_EXCEEDED~ (Matrix v1.18) now produce a readable, distinguishable message (including any ~info_uri~) instead of a generic status-code error.
 
 *Fixes*
 
