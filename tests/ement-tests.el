@@ -27,6 +27,7 @@
 (require 'map)
 
 (require 'ement-lib)
+(require 'ement-room)
 
 ;;;; Tests
 
@@ -52,6 +53,24 @@
                    "Hello, <a href=\"https://matrix.to/#/@foo:matrix.org\">foo</a>."))
     (should (equal (ement--format-body-mentions "Hello, @foo:matrix.org, how are you?" room)
                    "Hello, <a href=\"https://matrix.to/#/@foo:matrix.org\">foo</a>, how are you?"))))
+
+(ert-deftest ement-room--format-message-body/edit-bogus-formatted-body ()
+  "Plain-text edits shouldn't render as the outer fallback's bogus \"* \".
+Regression test for <https://github.com/ruma/ruma/issues/2536>: some
+clients send a spurious \"* \" `formatted_body' on the outer (fallback)
+content of a plain-text edit even though `m.new_content' correctly has
+none.  Ement should prefer `m.new_content''s (lack of) formatted body."
+  (let* ((content '((body . "* This is an edited message.")
+                    (msgtype . "m.text")
+                    (format . "org.matrix.custom.html")
+                    (formatted_body . "* ")
+                    (m.relates_to (rel_type . "m.replace")
+                                  (event_id . "$original_event_id"))
+                    (m.new_content (body . "This is an edited message.")
+                                   (msgtype . "m.text"))))
+         (event (make-ement-event :content content)))
+    (should (string= (ement-room--format-message-body event nil)
+                     "This is an edited message. [edited]"))))
 
 (provide 'ement-tests)
 

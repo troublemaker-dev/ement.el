@@ -4235,17 +4235,26 @@ If FORMATTED-P, return the formatted body content, when available."
                      ('m.new_content (map ('body new-body) ('formatted_body new-formatted-body)
                                           ('format new-content-format))))
                 content)
+               (editp (equal "m.replace" rel-type))
                (body (or new-body main-body))
-               (formatted-body (or new-formatted-body formatted-body))
+               ;; HACK: For edits, trust m.new_content's formatted_body (or lack
+               ;; thereof) rather than falling back to the outer content's.  The
+               ;; outer body/formatted_body are only a fallback for clients that
+               ;; don't understand m.replace, and some clients (due to a ruma bug,
+               ;; see <https://github.com/ruma/ruma/issues/2536>) send a bogus "* "
+               ;; formatted_body there for edits of plain-text messages even though
+               ;; m.new_content correctly has none.  Falling back to it would
+               ;; display just "*" instead of the real edited text.
+               (formatted-body (if editp new-formatted-body formatted-body))
+               (content-format (if editp new-content-format content-format))
                (body (if (or (not formatted-p) (not formatted-body))
                          ;; Copy the string so as not to add face properties to the one in the struct.
                          (copy-sequence body)
-                       (pcase (or new-content-format content-format)
+                       (pcase content-format
                          ("org.matrix.custom.html"
                           (save-match-data
                             (ement-room--render-html formatted-body)))
-                         (_ (format "[unknown body format: %s] %s"
-                                    (or new-content-format content-format) body)))))
+                         (_ (format "[unknown body format: %s] %s" content-format body)))))
                (appendix (pcase msgtype
                            ;; TODO: Face for m.notices.
                            ((or "m.text" "m.emote" "m.notice") nil)
@@ -4272,7 +4281,7 @@ If FORMATTED-P, return the formatted body content, when available."
                     "[message has no body content]"))))
     (when appendix
       (setf body (concat body " " appendix)))
-    (when (equal "m.replace" rel-type)
+    (when editp
       ;; Message is an edit.
       (setf body (concat body " " (propertize "[edited]" 'face 'font-lock-comment-face))))
     (when (and (or local-redacted-by unsigned-redacted-by)
