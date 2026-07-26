@@ -1828,7 +1828,7 @@ buffer).  It receives two arguments, the room and the session."
            id-or-alias)
     (user-error "Invalid room ID or alias (use, e.g. \"!ROOMID\", \"!ROOMID:SERVER\", or \"#ALIAS:SERVER\")"))
   (let ((endpoint (format "join/%s" (url-hexify-string id-or-alias))))
-    (ement-api session endpoint :method 'post :data ""
+    (ement-api session endpoint :method 'post :data "{}"
       :then (lambda (data)
               ;; NOTE: This generates a symbol and sets its function value to a lambda
               ;; which removes the symbol from the hook, removing itself from the hook.
