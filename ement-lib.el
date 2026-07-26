@@ -250,43 +250,59 @@ struct, or a room ID or alias string."
                     (_ (error "Unable to leave room %s: %s %S" room status plz-error)))))))))
 (defalias 'ement-leave-room #'ement-room-leave)
 
+(defun ement--server-force-forgets-p (session)
+  "Return non-nil if SESSION's server auto-forgets rooms upon leave.
+See the `m.forget_forced_upon_leave' capability (MSC4267), fetched
+by `ement--fetch-capabilities' into the session's server struct."
+  (eq t (map-nested-elt (ement-server-capabilities (ement-session-server session))
+                        '(m\.forget_forced_upon_leave enabled))))
+
 (defun ement-forget-room (room session &optional force-p)
   "Forget ROOM on SESSION.
 If FORCE-P (interactively, with prefix), prompt to leave the room
-when necessary, and forget the room without prompting."
+when necessary, and forget the room without prompting.
+
+If SESSION's server advertises the `m.forget_forced_upon_leave'
+capability (MSC4267), it already forgets rooms automatically upon
+leave, so no separate forget request is sent; ROOM is simply
+removed from the local session once left."
   (interactive
    (ement-with-room-and-session
      :prompt-form (ement-complete-room :prompt "Forget room: ")
      (list ement-room ement-session current-prefix-arg)))
-  (pcase-let* (((cl-struct ement-room id display-name status) room)
-               (endpoint (format "rooms/%s/forget" (url-hexify-string id))))
-    (pcase status
-      ('join (if (and force-p
-                      (yes-or-no-p (format "Leave and forget room %s? (WARNING: You will not be able to rejoin the room to access its content.) "
-                                           (ement--format-room room))))
-                 (progn
-                   ;; TODO: Use `letrec'.
-                   (let* ((forget-fn-symbol (gensym (format "ement-forget-%s" room)))
-                          (forget-fn (lambda (_session)
-                                       (when (equal 'leave (ement-room-status room))
-                                         (remove-hook 'ement-sync-callback-hook forget-fn-symbol)
-                                         ;; FIXME: Probably need to unintern the symbol.
-                                         (ement-forget-room room session 'force)))))
-                     (setf (symbol-function forget-fn-symbol) forget-fn)
-                     (add-hook 'ement-sync-callback-hook forget-fn-symbol))
-                   (ement-leave-room room session 'force))
-               (user-error "Room %s is joined (must be left before forgetting)"
-                           (ement--format-room room))))
-      ('leave (when (or force-p (yes-or-no-p (format "Forget room \"%s\" (%s)? " display-name id)))
-                (ement-api session endpoint :method 'post :data "{}"
-                  :then (lambda (_data)
-                          ;; NOTE: The spec does not seem to indicate that the action of forgetting
-                          ;; a room is synced to other clients, so it seems that we need to remove
-                          ;; the room from the session here.
-                          (setf (ement-session-rooms session)
-                                (cl-remove room (ement-session-rooms session)))
-                          ;; TODO: Indicate forgotten in footer in room buffer.
-                          (ement-message "Forgot room: %s." (ement--format-room room)))))))))
+  (cl-labels ((forgotten ()
+                ;; NOTE: The spec does not seem to indicate that the action of forgetting
+                ;; a room is synced to other clients, so it seems that we need to remove
+                ;; the room from the session here.
+                (setf (ement-session-rooms session)
+                      (cl-remove room (ement-session-rooms session)))
+                ;; TODO: Indicate forgotten in footer in room buffer.
+                (ement-message "Forgot room: %s." (ement--format-room room))))
+    (pcase-let* (((cl-struct ement-room id display-name status) room)
+                 (endpoint (format "rooms/%s/forget" (url-hexify-string id))))
+      (pcase status
+        ('join (if (and force-p
+                        (yes-or-no-p (format "Leave and forget room %s? (WARNING: You will not be able to rejoin the room to access its content.) "
+                                             (ement--format-room room))))
+                   (progn
+                     ;; TODO: Use `letrec'.
+                     (let* ((forget-fn-symbol (gensym (format "ement-forget-%s" room)))
+                            (forget-fn (lambda (_session)
+                                         (when (equal 'leave (ement-room-status room))
+                                           (remove-hook 'ement-sync-callback-hook forget-fn-symbol)
+                                           ;; FIXME: Probably need to unintern the symbol.
+                                           (ement-forget-room room session 'force)))))
+                       (setf (symbol-function forget-fn-symbol) forget-fn)
+                       (add-hook 'ement-sync-callback-hook forget-fn-symbol))
+                     (ement-leave-room room session 'force))
+                 (user-error "Room %s is joined (must be left before forgetting)"
+                             (ement--format-room room))))
+        ('leave (cond ((ement--server-force-forgets-p session)
+                       ;; Server already forgets automatically upon leave; nothing to send.
+                       (forgotten))
+                      ((or force-p (yes-or-no-p (format "Forget room \"%s\" (%s)? " display-name id)))
+                       (ement-api session endpoint :method 'post :data "{}"
+                         :then (lambda (_data) (forgotten))))))))))
 
 (defun ement-ignore-user (user-id session &optional unignore-p)
   "Ignore USER-ID on SESSION.
@@ -392,6 +408,48 @@ otherwise show in echo area."
       (ement--get-joined-members room session
         :then list-members))
     (message "Listing members of %s..." (ement--format-room room))))
+
+(cl-defun ement-mutual-rooms (user-id session &key bufferp)
+  "Show rooms in common with USER-ID on SESSION.
+Interactively, prompt for a known user ID and session.  If
+BUFFERP (interactively, with prefix), or if there are many
+results, show in a new buffer; otherwise show in the echo area.
+
+Uses `GET /_matrix/client/v1/mutual_rooms' (MSC2666)."
+  (interactive
+   (list (ement-complete-user-id)
+         (ement-complete-session)
+         :bufferp current-prefix-arg))
+  (cl-labels ((room-name (room-id)
+                (if-let ((room (cl-find room-id (ement-session-rooms session)
+                                        :key #'ement-room-id :test #'equal)))
+                    (format "%s (%s)" (ement-room-display-name room) room-id)
+                  room-id))
+              (show-rooms (room-ids)
+                (cond ((null room-ids)
+                       (message "No rooms in common with %s." user-id))
+                      ((or bufferp (length> room-ids 20))
+                       (let ((buffer (get-buffer-create (format "*Ement mutual rooms: %s*" user-id))))
+                         (with-current-buffer buffer
+                           (erase-buffer)
+                           (save-excursion
+                             (dolist (room-id room-ids)
+                               (insert (room-name room-id) "\n"))))
+                         (pop-to-buffer buffer)))
+                      (t (message "Rooms in common with %s: %s" user-id
+                                  (string-join (mapcar #'room-name room-ids) ", ")))))
+              (get-batch (from acc)
+                (ement-api session "mutual_rooms" :version "v1"
+                  :params (remove nil (list (list "user_id" user-id)
+                                            (when from (list "from" from))))
+                  :then (lambda (data)
+                          (pcase-let* (((map joined next_batch) data)
+                                       (room-ids (append acc (append joined nil))))
+                            (if next_batch
+                                (get-batch next_batch room-ids)
+                              (show-rooms room-ids)))))))
+    (message "Looking up rooms in common with %s..." user-id)
+    (get-batch nil nil)))
 
 (defun ement-send-direct-message (session user-id message)
   "Send a direct MESSAGE to USER-ID on SESSION.
@@ -853,6 +911,38 @@ echoed-back event."
                (endpoint (format "user/%s%s/account_data/%s" (url-hexify-string user-id) room-part type)))
     (ement-api session endpoint :method 'put :data (json-encode data)
       :then then)))
+
+(defconst ement-recent-emoji-limit 50
+  "Maximum number of entries kept in the `m.recent_emoji' account data.")
+
+(defun ement--recent-emoji (session)
+  "Return SESSION's recently-used emoji strings, most recent first.
+See the `m.recent_emoji' account data event (MSC4356)."
+  (pcase-let* (((cl-struct ement-session account-data) session)
+               (event (cl-find "m.recent_emoji" account-data
+                                :key (lambda (event) (alist-get 'type event)) :test #'equal)))
+    (cl-loop for entry across (map-nested-elt event '(content recent_emoji) [])
+             collect (alist-get 'emoji entry))))
+
+(defun ement--update-recent-emoji (session emoji)
+  "Record use of EMOJI in SESSION's `m.recent_emoji' account data.
+Bumps EMOJI to the front of the list and increments its usage
+count, capping the list at `ement-recent-emoji-limit' entries.
+See MSC4356."
+  (pcase-let* (((cl-struct ement-session account-data) session)
+               (event (cl-find "m.recent_emoji" account-data
+                                :key (lambda (event) (alist-get 'type event)) :test #'equal))
+               (recent-emoji (append (map-nested-elt event '(content recent_emoji)) nil))
+               (existing (cl-find emoji recent-emoji
+                                  :key (lambda (e) (alist-get 'emoji e)) :test #'equal))
+               (total (if existing (1+ (alist-get 'total existing)) 1))
+               (updated (cons (ement-alist "emoji" emoji "total" total)
+                              (cl-remove emoji recent-emoji
+                                         :key (lambda (e) (alist-get 'emoji e)) :test #'equal))))
+    (when (> (length updated) ement-recent-emoji-limit)
+      (setf updated (cl-subseq updated 0 ement-recent-emoji-limit)))
+    (ement-put-account-data session "m.recent_emoji"
+      (ement-alist "recent_emoji" (vconcat updated)))))
 
 (defun ement-redact (event room session &optional reason)
   "Redact EVENT in ROOM on SESSION, optionally for REASON."

@@ -44,10 +44,10 @@
 ;; that is so at expansion time, the expanded macro calls format the message and check the
 ;; log level at runtime, which is not zero-cost.
 
- (eval-and-compile
-   (require 'warnings)
-   (setq-local warning-minimum-log-level nil)
-   (setq-local warning-minimum-log-level :debug))
+(eval-and-compile
+  (require 'warnings)
+  (setq-local warning-minimum-log-level nil)
+  (setq-local warning-minimum-log-level :debug))
 
 ;;;; Requirements
 
@@ -341,6 +341,7 @@ Ement: SSO login accepted; session token received.  Connecting to Matrix server.
                 ;; HACK: If session is already in ement-sessions, this replaces it.  I think that's okay...
                 (setf (alist-get user-id ement-sessions nil nil #'equal) session)
                 (ement--schedule-token-refresh session)
+                (ement--fetch-capabilities session)
                 (ement--sync session :timeout ement-initial-sync-timeout))))
         ;; Start password login flow.  Prompt for user ID and password
         ;; if not given (i.e. if not called interactively.)
@@ -359,9 +360,9 @@ Interactively, with prefix, disconnect from all sessions.  If
 data.  When enabled, write the session to disk.  Any existing
 room buffers are left alive and can be read, but other commands
 in them won't work."
-  (interactive (list (if current-prefix-arg
-                         (mapcar #'cdr ement-sessions)
-                       (list (ement-complete-session)))))
+  (interactive (list (cond (current-prefix-arg (mapcar #'cdr ement-sessions))
+                           ((= 1 (length ement-sessions)) (list (cdar ement-sessions)))
+                           (t (list (ement-complete-session))))))
   (when ement-save-sessions
     ;; Write sessions before we remove them from the variable.
     (ement--write-sessions ement-sessions))
@@ -409,6 +410,7 @@ Useful in, e.g. `ement-disconnect-hook', which see."
                                                      (+ (float-time) (/ expires-in-ms 1000.0)))
           (alist-get user-id ement-sessions nil nil #'equal) session)
     (ement--schedule-token-refresh session)
+    (ement--fetch-capabilities session)
     (ement--sync session :timeout ement-initial-sync-timeout)))
 
 ;;;; Functions
@@ -538,6 +540,23 @@ struct to \"v3\" (if the server advertises any v1.N spec version) or \"r0\"
               (ement-debug "Server version negotiation failed; ement-api will use \"v3\" fallback")
               (funcall then)))))
 
+(defun ement--fetch-capabilities (session)
+  "Asynchronously fetch and store server capabilities for SESSION.
+Requires SESSION to already have an access token.  Sets the
+`capabilities' slot on SESSION's server struct to the alist from
+GET /capabilities's \"capabilities\" key.  Failure is non-fatal;
+the slot is simply left nil, and features gated on a capability
+(e.g. `m.forget_forced_upon_leave', see `ement-forget-room') fall
+back to their pre-capability behavior."
+  (ement-api session "capabilities"
+    :then (lambda (data)
+            (setf (ement-server-capabilities (ement-session-server session))
+                  (map-elt data 'capabilities))
+            (ement-debug "Fetched capabilities for <%s>" (ement-user-id (ement-session-user session))))
+    :else (lambda (_err)
+            (ement-debug "Fetching capabilities failed for <%s>; features gated on capabilities will use fallback behavior"
+                         (ement-user-id (ement-session-user session))))))
+
 (defun ement--hostname-uri (hostname)
   "Return the \".well-known\" URI for server HOSTNAME.
 If no URI is found, prompt the user for the hostname."
@@ -637,7 +656,10 @@ a filter ID).  When unspecified, the value of
                                         (`(,code . ,message)
                                          (signal 'ement-api-error (list (format "Ement: Network error: %s: %s" code message)
                                                                         plz-error)))
-                                        (_ (signal 'ement-api-error (list "Ement: Unrecognized network error" plz-error)))))))
+                                        ;; No curl-error means an HTTP response was received
+                                        ;; (e.g. M_USER_SUSPENDED/M_USER_LOCKED); let
+                                        ;; `ement-api-error' parse it for a readable message.
+                                        (_ (ement-api-error plz-error))))))
                           :json-read-fn (lambda ()
                                           "Print a message, then call `ement--json-parse-buffer'."
                                           (when (ement--sync-messages-p session)

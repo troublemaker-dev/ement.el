@@ -132,12 +132,36 @@ usually the DATA argument should be passed through
                (json-object (when body
                               (ignore-errors
                                 (json-read-from-string body))))
-               (error-message (format "%S: %s"
-                                      (or curl-exit-code status)
-                                      (or (when json-object
-                                            (alist-get 'error json-object))
-                                          curl-message
-                                          plz-message))))
+               (errcode (when json-object
+                          (alist-get 'errcode json-object)))
+               (error-message
+                (pcase errcode
+                  ;; SPEC (v1.18): account-status errors get a clearer, user-facing message
+                  ;; than the generic "STATUS: error" format, since they indicate a
+                  ;; persistent account condition rather than a transient request failure.
+                  ("M_USER_SUSPENDED"
+                   (format "Ement: Account suspended: %s%s"
+                           (alist-get 'error json-object)
+                           (if-let ((info-uri (alist-get 'info_uri json-object)))
+                               (format " (%s)" info-uri) "")))
+                  ("M_USER_LOCKED"
+                   (format "Ement: Account locked: %s%s"
+                           (alist-get 'error json-object)
+                           (if-let ((info-uri (alist-get 'info_uri json-object)))
+                               (format " (%s)" info-uri) "")))
+                  ("M_USER_LIMIT_EXCEEDED"
+                   (format "Ement: Account limit exceeded: %s%s%s"
+                           (alist-get 'error json-object)
+                           (if-let ((info-uri (alist-get 'info_uri json-object)))
+                               (format " (%s)" info-uri) "")
+                           (if (eq t (alist-get 'can_upgrade json-object))
+                               "  (account may be upgraded to raise this limit)" "")))
+                  (_ (format "%S: %s"
+                             (or curl-exit-code status)
+                             (or (when json-object
+                                   (alist-get 'error json-object))
+                                 curl-message
+                                 plz-message))))))
 
     (signal 'ement-api-error (list error-message))))
 

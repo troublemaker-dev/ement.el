@@ -60,7 +60,8 @@
 
 (cl-defstruct ement-server
   name uri-prefix
-  (negotiated-version nil :documentation "API URL version prefix negotiated at connect time (e.g. \"v3\" or \"r0\")."))
+  (negotiated-version nil :documentation "API URL version prefix negotiated at connect time (e.g. \"v3\" or \"r0\").")
+  (capabilities nil :documentation "Alist of server capabilities fetched from GET /capabilities, or nil if not yet fetched."))
 
 (cl-defstruct ement-session
   user server token transaction-id rooms next-batch
